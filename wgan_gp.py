@@ -15,6 +15,9 @@ import numpy as np
 import torchvision
 import pytorch_lightning as pl
 from scipy.linalg import sqrtm
+import torchvision.datasets as dset
+import torchvision.transforms as transforms
+import torchvision.utils as vutils
 
 class mirror(object):
  def __init__(self):
@@ -102,14 +105,16 @@ def stat_cosntraint2(x,y):
 def score(x,y):
   covx = cov(x)
   covy = cov(y)
+  nf = x.shape[2]
+  nc = x.shape[1]
   mux = torch.mean(x,dim=0)
   muy = torch.mean(y,dim=0)
   term1 = torch.norm(mux-muy)
-  covmean = np.zeros((3,128,128))
-  for i in range(3):
+  covmean = np.zeros((nc,nf,nf))
+  for i in range(nc):
     covmean[i] = sqrtm((torch.matmul(covx[i],covy[i])).cpu().detach())
   covmean = torch.tensor(covmean).to(x.device).type_as(x)
-  term2 = (torch.diagonal(covx+covy - 2*covmean, dim1=-2, dim2=-1).sum(-1).view(3,1))
+  term2 = (torch.diagonal(covx+covy - 2*covmean, dim1=-2, dim2=-1).sum(-1).view(nc,1))
   return torch.mean(term1 + torch.abs(term2))
 
 
@@ -166,7 +171,7 @@ class PixelNormLayer(nn.Module):
         self.eps = eps
     
     def forward(self, x):
-        return x / torch.sqrt(torch.mean(x ** 2, dim=1, keepdim=True) + 1e-4)
+        return x / torch.sqrt(torch.mean(x ** 2, dim=1, keepdim=True) + 1e-8)
 
     def __repr__(self):
         return self.__class__.__name__ + '(eps = %s)' % (self.eps)
@@ -205,16 +210,16 @@ class Generator(nn.Module):
         # size 32 x 32 x 96
         *block(96,48),
         # size 64 x 64 x 48
-        *block(96,3),
+        #*block(96,1),
         #size 128 x 128 x 3
-        nn.Conv2d(3,3,1),
+        nn.Conv2d(48,3,1),
     )
 
   def forward(self,z):
     nz = z.shape[1]
     b_size = z.shape[0]
-    z = self.fc(z)
-    z = z.reshape(b_size,nz,4,4)
+    z = z.reshape(b_size,nz,1,1)
+    z = self.input_layer(z)
     return self.main(z)
 
 class Discriminator(nn.Module):
@@ -245,7 +250,7 @@ class Discriminator(nn.Module):
         # 16 x 16 x 192
         *block(192,192),
         # 8 x 8 x 192
-        *block(192,192),
+        #*block(192,192),
         # 4 x 4 x 192
     )
 
@@ -280,6 +285,9 @@ class GAN(pl.LightningModule):
     else:
         self.netD = Discriminator()
     self.netD.apply(weights_init)
+    # cache for generated images
+    self.generated_imgs = None
+    self.last_imgs = None
     
     self.G_losses = []
     self.D_losses = []
@@ -294,7 +302,8 @@ class GAN(pl.LightningModule):
 
   def training_step(self, batch, batch_nb, optimizer_idx):
       
-      real_field = batch
+      real_field = batch[0]
+      self.last_imgs = real_field
       if not self.hparams.nv:
           omega = stream_vorticity(real_field).type_as(real_field)
           real_field = torch.cat((real_field,omega),1)
@@ -325,24 +334,26 @@ class GAN(pl.LightningModule):
           return output
       
       if optimizer_idx == 1:
-          z = torch.randn(real_field.shape[0],self.hparams.latent_dim).type_as(real_field)
-          gen_field = self(z)
-          if not self.hparams.nv:
-              omega = stream_vorticity(gen_field).type_as(gen_field)
-              gen_field = torch.cat((gen_field,omega),1)
-
-          g_loss = -torch.mean(self.netD(gen_field)) + 10*stat_cosntraint2(real_field,gen_field) + 10*torch.norm(cov(real_field)-cov(gen_field))
-          fid = score(real_field,gen_field).detach()
-          tqdm_dict = {'g_loss': g_loss,'score': fid}
-          self.score.append(fid)
-          output = OrderedDict({
-              'loss': g_loss,
-              'progress_bar': tqdm_dict,
-              'log': tqdm_dict,
-              })
-          self.G_losses.append(g_loss.detach())
-          self.iters += 1
-          return output
+          #if batch_nb % 5 == 0:
+              z = torch.randn(real_field.shape[0],self.hparams.latent_dim).type_as(real_field)
+              gen_field = self(z)
+              self.generated_imgs = gen_field
+              if not self.hparams.nv:
+                  omega = stream_vorticity(gen_field).type_as(gen_field)
+                  gen_field = torch.cat((gen_field,omega),1)
+    
+              g_loss = -torch.mean(self.netD(gen_field))
+              fid = score(real_field,gen_field).detach()
+              tqdm_dict = {'g_loss': g_loss,'score': fid}
+              self.score.append(fid)
+              output = OrderedDict({
+                  'loss': g_loss,
+                  'progress_bar': tqdm_dict,
+                  'log': tqdm_dict,
+                  })
+              self.G_losses.append(g_loss.detach())
+              self.iters += 1
+              return output
       
   def configure_optimizers(self):
 
@@ -358,12 +369,40 @@ class GAN(pl.LightningModule):
           return [opt_d, opt_g], [scheduler_d,scheduler_g]
       else:
           return opt_d, opt_g
+
+  def optimizer_step(self, current_epoch, batch_nb, optimizer, optimizer_i, second_order_closure=None):
+    # update generator opt every 5 steps
+    if optimizer_i == 0:
+        if batch_nb % 1 == 0 :
+            optimizer.step()
+            optimizer.zero_grad()
+
+    # update discriminator opt every step
+    if optimizer_i == 1:
+        if batch_nb % 1 == 0 :
+            optimizer.step()
+            optimizer.zero_grad()
     
   def train_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.hparams.batch_size,)
+        return DataLoader(self.dataset, batch_size=self.hparams.batch_size,shuffle=True)
   
   def prepare_data(self):
-    path = os.getcwd()
-    field = torch.load(path+'/field2d.pt')
-    dataset = mydataset(field, transform=transform())
+    path = os.getcwd() 
+    dataset = dset.CelebA(path, split='train', transform=transforms.Compose([
+                               transforms.Resize(64),
+                               transforms.CenterCrop(64),
+                               transforms.ToTensor(),
+                               transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]), target_transform=None, target_type='attr',
+                               download = False)
     self.dataset = dataset
+    
+  def on_epoch_end(self):
+        z = torch.randn(8, self.hparams.latent_dim)
+        # match gpu device (or keep as cpu)
+        if self.on_gpu:
+            z = z.cuda(self.last_imgs.device.index)
+
+        # log sampled images
+        sample_imgs = self(z)
+        grid = vutils.make_grid(sample_imgs)
+        self.logger.experiment.add_image(f'generated_images', grid, self.current_epoch)

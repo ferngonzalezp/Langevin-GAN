@@ -224,6 +224,8 @@ class GAN3d(pl.LightningModule):
   
     def training_step(self, batch, batch_nb, optimizer_idx):
         real_field = batch
+        self.s1 = self.s1.type_as(real_field)
+        self.s2 = self.s2.type_as(real_field)
         t = real_field.shape[2]
         if not self.hparams.nv:
           omega = stream_vorticity(real_field[:,:,0]).type_as(real_field[:,:,0])
@@ -261,8 +263,11 @@ class GAN3d(pl.LightningModule):
               gen_field_t = torch.cat((gen_field_t,omega.view(real_field.shape[0],1,t,128,128)),dim=1)
         
           g_loss = (-torch.mean(self.netD(gen_field)) -torch.mean(self.D_time(gen_field_t)) 
-                     + 10*stat_cosntraint2(real_field[:,:,0],gen_field) + 10*mse1(gen_field_t,self.s1) +1000*mse2(gen_field_t[:,0:3],self.s2))
-          fid = score(torch.mean(real_field,dim=2),torch.mean(gen_field_t,dim=2)).detach()
+                     + 10*mse1(gen_field_t,self.s1) +1*mse2(gen_field_t[:,0:3],self.s2))
+          fid = score(real_field[:,:,0],gen_field_t[:,:,0]).detach()
+          for i in range(1,4):
+              fid += score(real_field[:,:,i],gen_field_t[:,:,i]).detach()
+          fid = fid/4
           tqdm_dict = {'g_loss': g_loss,'score': fid}
           output = OrderedDict({
               'loss': g_loss,
@@ -283,7 +288,10 @@ class GAN3d(pl.LightningModule):
               
             grad_penalty = calc_gradient_penalty(self.D_time,real_field,gen_field_t,l=400)
             d_time_loss = self.adversarial_loss(self.D_time(real_field),self.D_time(gen_field_t)) + grad_penalty
-            fid = score(torch.mean(real_field,dim=2),torch.mean(gen_field_t,dim=2)).detach()
+            fid = score(real_field[:,:,0],gen_field_t[:,:,0]).detach()
+            for i in range(1,4):
+                  fid += score(real_field[:,:,i],gen_field_t[:,:,i]).detach()
+            fid = fid/4
             tqdm_dict = {'d_time_loss': d_time_loss, 'score': fid}
             output = OrderedDict({
               'loss': d_time_loss,
@@ -319,8 +327,11 @@ class GAN3d(pl.LightningModule):
               gen_field_t = torch.cat((gen_field_t,omega.view(real_field.shape[0],1,t,128,128)),dim=1)
             
             rnn_loss = (-torch.mean(self.D_time(gen_field_t)) -torch.mean(self.D_norm(zt)) + 10*mse1(gen_field_t,self.s1)
-                        +1000*mse2(gen_field_t[:,0:3],self.s2) +100*mse3(z,zt))
-            fid = score(torch.mean(real_field,dim=2),torch.mean(gen_field_t,dim=2)).detach()
+                        +1*mse2(gen_field_t[:,0:3],self.s2) +100*mse3(z,zt))
+            fid = score(real_field[:,:,0],gen_field_t[:,:,0]).detach()
+            for i in range(1,4):
+              fid += score(real_field[:,:,i],gen_field_t[:,:,i]).detach()
+            fid = fid/4
             tqdm_dict = {'rnn_loss': rnn_loss, 'score': fid}
             output = OrderedDict({
               'loss': rnn_loss,
@@ -362,9 +373,5 @@ class GAN3d(pl.LightningModule):
         s_hat = 0
         for i in range(t):
            s_hat += spec(field[0:100,:,i])[1]/t
-        self.s1 = torch.mean(s_hat,dim=0).unsqueeze(0).type_as(field)
-        if self.on_gpu:
-            self.s1 = self.s1.cuda(field.device.index)
-        self.s2 = s2(field[0:100]).type_as(field)
-        if self.on_gpu:
-            self.s2 = self.s2.cuda(field.device.index)
+        self.s1 = torch.mean(s_hat,dim=0).unsqueeze(0)   
+        self.s2 = s2(field)
