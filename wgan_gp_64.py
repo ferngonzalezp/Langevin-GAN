@@ -171,7 +171,7 @@ class PixelNormLayer(nn.Module):
         self.eps = eps
     
     def forward(self, x):
-        return x / torch.sqrt(torch.mean(x ** 2, dim=1, keepdim=True) + 1e-8)
+        return x / torch.sqrt(torch.mean(x ** 2, dim=1, keepdim=True) + 1e-4)
 
     def __repr__(self):
         return self.__class__.__name__ + '(eps = %s)' % (self.eps)
@@ -183,24 +183,24 @@ class Generator(nn.Module):
 
     self.input_layer = nn.Sequential(
       nn.ConvTranspose2d(latent_dim,latent_dim,4),
-      PixelNormLayer(),
       nn.LeakyReLU(0.2,True),
+      PixelNormLayer()
     )
 
     def block(in_feats,out_feats):
-      layers = [nn.UpsamplingNearest2d(scale_factor=2)]
+      layers = [nn.UpsamplingBilinear2d(scale_factor=2)]
       layers.append(nn.Conv2d(in_feats,out_feats,3,padding=1))
-      layers.append(PixelNormLayer())
       layers.append(nn.LeakyReLU(0.2,True))
+      layers.append(PixelNormLayer())
       layers.append(nn.Conv2d(out_feats,out_feats,3,padding=1))
-      layers.append(PixelNormLayer())
       layers.append(nn.LeakyReLU(0.2,True))
+      layers.append(PixelNormLayer())
       return layers
 
     self.main = nn.Sequential(
         nn.Conv2d(192,192,3,padding=1),
-        PixelNormLayer(),
         nn.LeakyReLU(0.2,True),
+        PixelNormLayer(),
         # size 4 x 4 x 192
         *block(192,192),
         # size 8 x 8 x 192
@@ -210,9 +210,9 @@ class Generator(nn.Module):
         # size 32 x 32 x 96
         *block(96,48),
         # size 64 x 64 x 48
-        *block(48,24),
-        #size 128 x 128 x 24
-        nn.Conv2d(24,3,1),
+        #*block(96,1),
+        #size 128 x 128 x 3
+        nn.Conv2d(48,3,1),
     )
 
   def forward(self,z):
@@ -240,17 +240,17 @@ class Discriminator(nn.Module):
       return layers
     
     self.main = nn.Sequential(
-        nn.ConvTranspose2d(self.input_features,24,1),
-        # 128 x 128 x 24
-        *block(24,48),
-        # 64 x 64 x 48
+        nn.ConvTranspose2d(self.input_features,48,1),
+        # 128 x 128 x 48
         *block(48,96),
-        # 32 x 32 x 96
+        # 64 x 64 x 96
         *block(96,192),
+        # 32 x 32 x 192
+        *block(192,192),
         # 16 x 16 x 192
         *block(192,192),
         # 8 x 8 x 192
-        *block(192,192),
+        #*block(192,192),
         # 4 x 4 x 192
     )
 
@@ -260,7 +260,7 @@ class Discriminator(nn.Module):
         nn.Conv2d(192,192,4),
         nn.LeakyReLU(0.2,True),
     )
-    self.fc = nn.Linear(192,1,bias=True)
+    self.fc = nn.Linear(192,1,bias=False)
 
   def forward(self,field):
       b_size = field.shape[0]
@@ -370,15 +370,27 @@ class GAN(pl.LightningModule):
       else:
           return opt_d, opt_g
 
+  def optimizer_step(self, current_epoch, batch_nb, optimizer, optimizer_i, second_order_closure=None):
+    # update generator opt every 5 steps
+    if optimizer_i == 0:
+        if batch_nb % 1 == 0 :
+            optimizer.step()
+            optimizer.zero_grad()
+
+    # update discriminator opt every step
+    if optimizer_i == 1:
+        if batch_nb % 1 == 0 :
+            optimizer.step()
+            optimizer.zero_grad()
     
   def train_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.hparams.batch_size,shuffle=True, num_workers=2)
+        return DataLoader(self.dataset, batch_size=self.hparams.batch_size,shuffle=True)
   
   def prepare_data(self):
     path = os.getcwd() 
     dataset = dset.CelebA(path, split='train', transform=transforms.Compose([
-                               transforms.Resize(128),
-                               transforms.CenterCrop(128),
+                               transforms.Resize(64),
+                               transforms.CenterCrop(64),
                                transforms.ToTensor(),
                                transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]), target_transform=None, target_type='attr',
                                download = False)
