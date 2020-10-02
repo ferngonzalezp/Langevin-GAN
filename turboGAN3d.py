@@ -154,17 +154,21 @@ class Discriminator_time(nn.Module):
         nn.LeakyReLU(0.2,True),
         # 4 x 4 x 4 x 96
     )
-
-    self.fc = nn.Sequential(
-        nn.Linear(96*4*4*4,96,bias=True),
+    self.last_block = nn.Sequential(
+        nn.Conv3d(96+1,96,3,padding=1),
         nn.LeakyReLU(0.2,True),
-        nn.Linear(96,1,bias=False)
+        nn.Conv3d(96,96,4),
+        nn.LeakyReLU(0.2,True),
     )
+    self.fc = nn.Linear(96,1,bias=False)
 
    def forward(self,field):
      b_size = field.shape[0]
      field = self.main(field)
-     field = field.reshape(b_size,96*4*4*4)
+     mstd = torch.std(field,dim=1).unsqueeze(1)
+     field = torch.cat((field,mstd),dim=1)
+     field = self.last_block(field)
+     field = field.reshape(b_size,96)
      return self.fc(field)
  
 
