@@ -166,7 +166,7 @@ class PixelNormLayer(nn.Module):
         self.eps = eps
     
     def forward(self, x):
-        return x / torch.sqrt(torch.mean(x ** 2, dim=1, keepdim=True) + 1e-4)
+        return x / torch.sqrt(torch.mean(x ** 2, dim=1, keepdim=True) + 1e-8)
 
     def __repr__(self):
         return self.__class__.__name__ + '(eps = %s)' % (self.eps)
@@ -178,24 +178,24 @@ class Generator(nn.Module):
 
     self.input_layer = nn.Sequential(
       nn.ConvTranspose2d(latent_dim,latent_dim,4),
-      nn.LeakyReLU(0.2,True),
-      PixelNormLayer()
+      PixelNormLayer(),
+      nn.LeakyReLU(0.2,True)
     )
 
     def block(in_feats,out_feats):
       layers = [nn.UpsamplingBilinear2d(scale_factor=2)]
       layers.append(nn.Conv2d(in_feats,out_feats,3,padding=1))
-      layers.append(nn.LeakyReLU(0.2,True))
       layers.append(PixelNormLayer())
+      layers.append(nn.LeakyReLU(0.2,True))
       layers.append(nn.Conv2d(out_feats,out_feats,3,padding=1))
-      layers.append(nn.LeakyReLU(0.2,True))
       layers.append(PixelNormLayer())
+      layers.append(nn.LeakyReLU(0.2,True))
       return layers
 
     self.main = nn.Sequential(
         nn.Conv2d(192,192,3,padding=1),
-        nn.LeakyReLU(0.2,True),
         PixelNormLayer(),
+        nn.LeakyReLU(0.2,True),
         # size 4 x 4 x 192
         *block(192,192),
         # size 8 x 8 x 192
@@ -205,16 +205,16 @@ class Generator(nn.Module):
         # size 32 x 32 x 96
         *block(96,48),
         # size 64 x 64 x 48
-        *block(96,3),
+        *block(48,24),
         #size 128 x 128 x 3
-        nn.Conv2d(3,3,1),
+        nn.Conv2d(24,3,1),
     )
 
   def forward(self,z):
     nz = z.shape[1]
     b_size = z.shape[0]
-    z = self.fc(z)
-    z = z.reshape(b_size,nz,4,4)
+    z = z.reshape(b_size,nz,1,1)
+    z = self.input_layer(z)
     return self.main(z)
 
 class Discriminator(nn.Module):
@@ -235,13 +235,13 @@ class Discriminator(nn.Module):
       return layers
     
     self.main = nn.Sequential(
-        nn.ConvTranspose2d(self.input_features,48,1),
+        nn.ConvTranspose2d(self.input_features,24,1),
         # 128 x 128 x 48
-        *block(48,96),
+        *block(24,48),
         # 64 x 64 x 96
-        *block(96,192),
+        *block(48,96),
         # 32 x 32 x 192
-        *block(192,192),
+        *block(96,192),
         # 16 x 16 x 192
         *block(192,192),
         # 8 x 8 x 192
@@ -310,7 +310,7 @@ class GAN(pl.LightningModule):
               omega = stream_vorticity(gen_field).type_as(gen_field)
               gen_field = torch.cat((gen_field,omega),1)
 
-          grad_penalty = calc_gradient_penalty(self.netD,real_field,gen_field)
+          grad_penalty = calc_gradient_penalty(self.netD,real_field,gen_field,l=100)
           d_loss = self.adversarial_loss(self.netD(real_field),self.netD(gen_field)) + grad_penalty
           fid = score(real_field,gen_field).detach()
           tqdm_dict = {'d_loss': d_loss, 'score': fid}
@@ -331,7 +331,7 @@ class GAN(pl.LightningModule):
               omega = stream_vorticity(gen_field).type_as(gen_field)
               gen_field = torch.cat((gen_field,omega),1)
 
-          g_loss = -torch.mean(self.netD(gen_field)) + 10*stat_cosntraint2(real_field,gen_field) + 10*torch.norm(cov(real_field)-cov(gen_field))
+          g_loss = -torch.mean(self.netD(gen_field)) + 10*stat_cosntraint2(real_field,gen_field)
           fid = score(real_field,gen_field).detach()
           tqdm_dict = {'g_loss': g_loss,'score': fid}
           self.score.append(fid)
